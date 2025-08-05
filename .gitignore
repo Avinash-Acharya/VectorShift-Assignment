@@ -1,0 +1,41 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+venv/
+.venv/
+env/
+
+# Node.js dependencies
+node_modules/
+
+# Build outputs
+build/
+dist/
+
+# Database files
+dump.rdb
+*.db
+*.sqlite
+
+# IDE files
+.vscode/
+.idea/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Log files
+*.log
+
+# Secret/Environment files
+.env
+.env.*
+*.key
+config.json
+secrets.json
+
+# Project specific
+VectorShift - Integrations Technical Assessment Instructions.pdf
