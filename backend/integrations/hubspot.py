@@ -10,6 +10,7 @@ import base64
 import requests
 from integrations.integration_item import IntegrationItem
 from config import config
+from urllib.parse import urlencode
 
 from redis_client import add_key_value_redis, get_value_redis, delete_key_redis
 
@@ -20,7 +21,6 @@ CLIENT_SECRET = config.HUBSPOT_CLIENT_SECRET
 
 REDIRECT_URI = 'http://localhost:8000/integrations/hubspot/oauth2callback'
 SCOPES = 'crm.objects.contacts.read crm.objects.companies.read crm.objects.deals.read'
-authorization_url = f'https://app.hubspot.com/oauth/authorize?client_id={CLIENT_ID}&response_type=code&scope={SCOPES}&redirect_uri={REDIRECT_URI}'
 
 async def authorize_hubspot(user_id, org_id):
     state_data = {
@@ -29,8 +29,15 @@ async def authorize_hubspot(user_id, org_id):
         'org_id': org_id
     }
     encoded_state = base64.urlsafe_b64encode(json.dumps(state_data).encode('utf-8')).decode('utf-8')
-    
-    auth_url = f'{authorization_url}&state={encoded_state}'
+    # Build the authorization URL with proper URL encoding of query parameters
+    params = {
+        'client_id': CLIENT_ID,
+        'response_type': 'code',
+        'scope': SCOPES,  # spaces will be encoded as %20 by urlencode
+        'redirect_uri': REDIRECT_URI,
+        'state': encoded_state,
+    }
+    auth_url = f"https://app.hubspot.com/oauth/authorize?{urlencode(params)}"
     await add_key_value_redis(f'hubspot_state:{org_id}:{user_id}', json.dumps(state_data), expire=600)
     
     return auth_url
@@ -79,8 +86,41 @@ async def oauth2callback_hubspot(request: Request):
     
     if response.status_code != 200:
         raise HTTPException(status_code=400, detail='Failed to exchange code for token.')
-    
-    await add_key_value_redis(f'hubspot_credentials:{org_id}:{user_id}', json.dumps(response.json()), expire=600)
+    # Debug: print token payload (sanitized) before saving to Redis
+    tokens = response.json()
+    try:
+        access_token = tokens.get('access_token')
+        redacted = {
+            'hub_id': tokens.get('hub_id'),  # may be absent in token response
+            'expires_in': tokens.get('expires_in'),
+            'scope': tokens.get('scope'),   # may be absent
+            'token_type': tokens.get('token_type'),
+            'access_token_preview': (access_token or '')[:8] + '...' if access_token else None,
+            'refresh_token_present': bool(tokens.get('refresh_token')),
+        }
+        print(f"HubSpot OAuth token response (sanitized): {redacted}")
+    except Exception as e:
+        print(f"Failed to log HubSpot token response: {e}")
+
+    # Optional: call HubSpot access token info endpoint to enrich with hub_id and scopes
+    try:
+        if tokens.get('access_token'):
+            async with httpx.AsyncClient() as client_info:
+                info_resp = await client_info.get(
+                    f"https://api.hubapi.com/oauth/v1/access-tokens/{tokens['access_token']}"
+                )
+            if info_resp.status_code == 200:
+                info = info_resp.json()
+                # info typically contains: hub_id, user, scopes, token_type, etc.
+                tokens['hub_id'] = tokens.get('hub_id') or info.get('hub_id')
+                tokens['scopes'] = info.get('scopes')
+                print(f"HubSpot token info: hub_id={tokens['hub_id']}, scopes={tokens.get('scopes')}")
+            else:
+                print(f"Failed to fetch token info: {info_resp.status_code} - {info_resp.text}")
+    except Exception as e:
+        print(f"Error during token info fetch: {e}")
+
+    await add_key_value_redis(f'hubspot_credentials:{org_id}:{user_id}', json.dumps(tokens), expire=600)
     
     close_window_script = """
     <html>
@@ -140,6 +180,7 @@ async def get_items_hubspot(credentials) -> list[IntegrationItem]:
     """Fetches and returns HubSpot CRM objects as IntegrationItem objects"""
     credentials = json.loads(credentials)
     access_token = credentials.get('access_token')
+    refresh_token = credentials.get('refresh_token')
     
     if not access_token:
         raise HTTPException(status_code=400, detail='Missing access token.')
@@ -158,6 +199,38 @@ async def get_items_hubspot(credentials) -> list[IntegrationItem]:
         ('deals', 'https://api.hubapi.com/crm/v3/objects/deals'),
     ]
     
+    def try_refresh_and_update_headers() -> bool:
+        """Attempt to refresh the access token using the provided refresh_token.
+        Returns True if refreshed successfully and updates headers; else False.
+        """
+        nonlocal access_token, headers
+        if not refresh_token:
+            return False
+        try:
+            resp = requests.post(
+                'https://api.hubapi.com/oauth/v1/token',
+                data={
+                    'grant_type': 'refresh_token',
+                    'client_id': CLIENT_ID,
+                    'client_secret': CLIENT_SECRET,
+                    'redirect_uri': REDIRECT_URI,
+                    'refresh_token': refresh_token,
+                },
+                headers={'Content-Type': 'application/x-www-form-urlencoded'}
+            )
+            if resp.status_code == 200:
+                refreshed = resp.json()
+                access_token = refreshed.get('access_token') or access_token
+                headers['Authorization'] = f'Bearer {access_token}'
+                # Do not print full tokens
+                print('HubSpot access token refreshed successfully')
+                return True
+            else:
+                print(f"Failed to refresh token: {resp.status_code} - {resp.text}")
+        except Exception as e:
+            print(f"Error during token refresh: {e}")
+        return False
+
     for object_type, endpoint in objects_to_fetch:
         try:
             # Fetch first page of results
@@ -168,9 +241,15 @@ async def get_items_hubspot(credentials) -> list[IntegrationItem]:
             
             response = requests.get(endpoint, headers=headers, params=params)
             
+            if response.status_code == 401:
+                # Try refreshing the token once and retry the request
+                if try_refresh_and_update_headers():
+                    response = requests.get(endpoint, headers=headers, params=params)
+
             if response.status_code == 200:
                 data = response.json()
                 results = data.get('results', [])
+                print(f"HubSpot API fetched {len(results)} {object_type}")
                 
                 # Convert singular form for item type
                 item_type = object_type[:-1] if object_type.endswith('s') else object_type
@@ -178,6 +257,13 @@ async def get_items_hubspot(credentials) -> list[IntegrationItem]:
                 for item in results:
                     integration_item = create_integration_item_metadata_object(item, item_type)
                     list_of_integration_items.append(integration_item)
+                # Optional: log a small sample of raw items for verification
+                try:
+                    sample = results[:2]
+                    if sample:
+                        print(f"Sample {object_type} (first 2): {json.dumps(sample)[:500]}")
+                except Exception as e:
+                    print(f"Failed to print sample {object_type}: {e}")
                     
             else:
                 print(f"Failed to fetch {object_type}: {response.status_code} - {response.text}")
@@ -185,5 +271,7 @@ async def get_items_hubspot(credentials) -> list[IntegrationItem]:
         except Exception as e:
             print(f"Error fetching {object_type}: {str(e)}")
     
-    print(f'HubSpot integration items: {list_of_integration_items}')
-    return list_of_integration_items
+    print(f'HubSpot integration items (count): {len(list_of_integration_items)}')
+    # Ensure JSON-serializable response: convert IntegrationItem objects to plain dicts
+    serializable_items = [vars(item) for item in list_of_integration_items]
+    return serializable_items

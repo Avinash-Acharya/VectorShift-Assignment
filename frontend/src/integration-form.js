@@ -22,9 +22,9 @@ export const IntegrationForm = () => {
     const [currType, setCurrType] = useState(null);
     const CurrIntegration = integrationMapping[currType];
 
-  return (
-    <Box display='flex' justifyContent='center' alignItems='center' flexDirection='column' sx={{ width: '100%' }}>
-        <Box display='flex' flexDirection='column'>
+    return (
+        <Box display='flex' justifyContent='center' alignItems='center' flexDirection='column' sx={{ width: '100%' }}>
+                <Box display='flex' flexDirection='column' sx={{ width: '100%', maxWidth: 900 }}>
         <TextField
             label="User"
             value={user}
@@ -45,13 +45,13 @@ export const IntegrationForm = () => {
             onChange={(e, value) => setCurrType(value)}
         />
         </Box>
-        {currType && 
-        <Box>
+    {currType && 
+    <Box sx={{ width: '100%', maxWidth: 900 }}>
             <CurrIntegration user={user} org={org} integrationParams={integrationParams} setIntegrationParams={setIntegrationParams} />
         </Box>
         }
-        {integrationParams?.credentials && 
-        <Box sx={{mt: 2}}>
+    {integrationParams?.credentials && 
+    <Box sx={{ mt: 2, width: '100%', maxWidth: 900 }}>
             <DataForm integrationType={integrationParams?.type} credentials={integrationParams?.credentials} />
         </Box>
         }

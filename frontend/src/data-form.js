@@ -22,6 +22,9 @@ export const DataForm = ({ integrationType, credentials }) => {
             formData.append('credentials', JSON.stringify(credentials));
             const response = await axios.post(`http://localhost:8000/integrations/${endpoint}/load`, formData);
             const data = response.data;
+            // Log to browser console for verification
+            // eslint-disable-next-line no-console
+            console.log('Loaded data from backend:', data);
             setLoadedData(data);
         } catch (e) {
             alert(e?.response?.data?.detail);
@@ -33,10 +36,20 @@ export const DataForm = ({ integrationType, credentials }) => {
             <Box display='flex' flexDirection='column' width='100%'>
                 <TextField
                     label="Loaded Data"
-                    value={loadedData || ''}
-                    sx={{mt: 2}}
+                    value={loadedData ? JSON.stringify(loadedData, null, 2) : ''}
+                    sx={{
+                        mt: 2,
+                        width: '100%',
+                        '& textarea': {
+                            whiteSpace: 'pre-wrap',
+                            fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace',
+                        },
+                    }}
                     InputLabelProps={{ shrink: true }}
-                    disabled
+                    multiline
+                    minRows={10}
+                    fullWidth
+                    InputProps={{ readOnly: true }}
                 />
                 <Button
                     onClick={handleLoad}
